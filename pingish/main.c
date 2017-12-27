@@ -28,8 +28,8 @@
 
 #define PACKET_SIZE     4096
 #define MAX_WAIT_TIME   5
-
-#define MAX_NO_PACKETS  3
+#define MAX_NO_PACKETS  1
+#define RX_BUF_SIZE 50 * 1024
 
 
 char sendpacket[PACKET_SIZE];
@@ -38,7 +38,7 @@ struct icmp* icmpSendPacket = (struct icmp*)sendpacket;
 char recvpacket[PACKET_SIZE];
 struct icmp* icmpRecvPacket = (struct icmp*)recvpacket;
 
-int sockfd;
+int sockfd = 0;
 int datalen = 56;
 
 int nsend = 0;
@@ -68,25 +68,48 @@ void recv_packet(void);
 
 int unpack(char *buf, long len);
 
-void tv_sub(struct timeval *out, struct timeval *in);
-
-
 
 int quit(int code, const char *msg) {
+  fprintf(stderr, "%s\n", msg);
+  exit(code);
+  return code;
+}
+
+int pexit(int code, const char *msg) {
   perror(msg);
   exit(code);
   return code;
 }
 
+void tv_sub(struct timeval *out, struct timeval *in) {
+
+  if ((out->tv_usec -= in->tv_usec) < 0)  {
+    --out->tv_sec;
+    out->tv_usec += 1000000;
+  }
+  out->tv_sec -= in->tv_sec;
+}
+
+
+void shutdown_app(int code) {
+  if (sockfd != 0) {
+    close(sockfd);
+    sockfd = 0;
+  }
+  exit(code);
+}
+
+/*
+ Callback on a signal.
+ Print some stats to stderr; then exit
+ */
 void statistics(int signo) {
   fprintf(stderr, "\n%d packets transmitted, %d received , %%%d lost\n",
           nsend,
          nreceived,
           (nsend - nreceived) / nsend * 100);
-  close(sockfd);
-  exit(0);
+  shutdown_app(0);
 }
-
 
 
 unsigned short cal_chksum(unsigned short *addr, int len)
@@ -122,13 +145,9 @@ int pack(int pack_no)
   icmpSendPacket->icmp_id = pid;
   packsize = 8 + datalen;
   tval = (struct timeval*)icmpSendPacket->icmp_data;
-
   gettimeofday(tval, NULL);
-
   icmpSendPacket->icmp_cksum = cal_chksum((unsigned short*)icmpSendPacket, packsize);
-
   return packsize;
-
 }
 
 
@@ -140,25 +159,15 @@ void send_packet()
 
   int packetsize;
 
-  while (nsend < MAX_NO_PACKETS)
-
-  {
-
+  while (nsend < MAX_NO_PACKETS) {
     nsend++;
-
     packetsize = pack(nsend);
-
     if (sendto(sockfd, sendpacket, packetsize, 0, (struct sockaddr*)
-
-               &dest_addr, sizeof(dest_addr)) < 0)
-
-    {
-
+               &dest_addr, sizeof(dest_addr)) < 0) {
       perror("sendto error");
-
       continue;
-
-    } sleep(1);
+    }
+    sleep(1);
 
   }
 
@@ -171,41 +180,35 @@ void send_packet()
 void recv_packet()
 
 {
-
   ssize_t n;
   socklen_t fromlen;
-
   extern int errno;
 
   signal(SIGALRM, statistics);
-
   fromlen = sizeof(from);
 
-  while (nreceived < nsend)
-
-  {
+  while (nreceived < nsend) {
 
     alarm(MAX_WAIT_TIME);
-
-    if ((n = recvfrom(sockfd, recvpacket,
+    if ((n = recvfrom(sockfd,
+                      recvpacket,
                       sizeof(recvpacket), 0,
                       (struct sockaddr*) &from, &fromlen)) < 0)
 
     {
 
-      if (errno == EINTR)
-
+      if (errno == EINTR) {
         continue;
+      }
 
       perror("recvfrom error");
 
       continue;
 
-    } gettimeofday(&tvrecv, NULL);
+    }
+    gettimeofday(&tvrecv, NULL);
 
-    if (unpack(recvpacket, n) ==  - 1)
-
-      continue;
+    if (unpack(recvpacket, n) ==  - 1) continue;
 
     nreceived++;
 
@@ -238,7 +241,7 @@ int unpack(char *buf, long len) {
   len -= iphdrlen;
 
   if (len < 8)  {
-    perror("ICMP packets\'s length is less than 8\n");
+    fprintf(stderr, "ICMP packets length less than 8: %ld\n", len);
     return  - 1;
   }
 
@@ -268,13 +271,18 @@ int main(int argc, const char * argv[]) {
   struct protoent *protocol;
   unsigned long inaddr = 0l;
   int waittime = 10 * 60 * 1000;
-  int size = 50 * 1024;
+  int size = RX_BUF_SIZE;
 
   if (argc != 2) {
     return quit(1, "Usage: pingish: <ipaddr>");
   }
   protocol = getprotobyname("icmp");
   assert(protocol != NULL);
+
+  if ((sockfd = socket(AF_INET, SOCK_RAW, protocol->p_proto)) < 0)  {
+    pexit(1, "socket error");
+  }
+  pid = getpid();
 
   setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
 
@@ -285,7 +293,6 @@ int main(int argc, const char * argv[]) {
   if (INADDR_NONE == dest_addr.sin_addr.s_addr) {
     return quit(-1, "Unknown address");
   }
-  pid = getpid();
 
   send_packet();
   recv_packet();

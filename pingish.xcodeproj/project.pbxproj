@@ -23,8 +23,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		BC7CCE431FF14FE100EB901F /* pingish */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = pingish; sourceTree = BUILT_PRODUCTS_DIR; };
+		BC7CCE431FF14FE100EB901F /* pingish */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "compiled.mach-o.executable"; path = pingish; sourceTree = BUILT_PRODUCTS_DIR; };
 		BC7CCE461FF14FE100EB901F /* main.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = main.c; sourceTree = "<group>"; };
+		BC7CCE4D1FF3B42100EB901F /* CMakeLists.txt */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = CMakeLists.txt; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -58,6 +59,7 @@
 			isa = PBXGroup;
 			children = (
 				BC7CCE461FF14FE100EB901F /* main.c */,
+				BC7CCE4D1FF3B42100EB901F /* CMakeLists.txt */,
 			);
 			path = pingish;
 			sourceTree = "<group>";
