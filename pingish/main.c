@@ -28,7 +28,7 @@
 
 #define PACKET_SIZE     4096
 #define MAX_WAIT_TIME   5
-#define MAX_NO_PACKETS  1
+#define MAX_NO_PACKETS  4
 #define RX_BUF_SIZE 50 * 1024
 
 
@@ -56,11 +56,14 @@ struct sockaddr_in from;
 
 struct timeval tvrecv;
 
+
+// forward declarations
+
 void statistics(int signo);
 
 unsigned short cal_chksum(unsigned short *addr, int len);
 
-int pack(int pack_no);
+//int build_packet(int packet_id);
 
 void send_packet(void);
 
@@ -104,7 +107,7 @@ void shutdown_app(int code) {
  Print some stats to stderr; then exit
  */
 void statistics(int signo) {
-  fprintf(stderr, "\n%d packets transmitted, %d received , %%%d lost\n",
+  fprintf(stderr, "\n%d packets transmitted, %d received , %d%% lost\n",
           nsend,
          nreceived,
           (nsend - nreceived) / nsend * 100);
@@ -112,6 +115,7 @@ void statistics(int signo) {
 }
 
 
+/* Calculate the checksum. */
 unsigned short cal_chksum(unsigned short *addr, int len)
 {
   int nleft = len;
@@ -127,141 +131,128 @@ unsigned short cal_chksum(unsigned short *addr, int len)
     *(unsigned char*)(&answer) = *(unsigned char*)w;
     sum += answer;
   }
-  sum = (sum >> 16) + (sum &0xffff);
+  sum = (sum >> 16) + (sum & 0xffff);
   sum += (sum >> 16);
   answer = ~sum;
   return answer;
 }
 
+/*
+ Build a packet in icmpSendPacket.
+ packet_id: id to use in sequence ID.
+ */
 
-int pack(int pack_no)
+int build_packet(int packet_id, struct timeval* now)
 {
   int packsize;
   struct timeval *tval;
   icmpSendPacket->icmp_type = ICMP_ECHO;
   icmpSendPacket->icmp_code = 0;
   icmpSendPacket->icmp_cksum = 0;
-  icmpSendPacket->icmp_seq = pack_no;
+  icmpSendPacket->icmp_seq = packet_id;
   icmpSendPacket->icmp_id = pid;
   packsize = 8 + datalen;
   tval = (struct timeval*)icmpSendPacket->icmp_data;
-  gettimeofday(tval, NULL);
+  *tval = *now;
   icmpSendPacket->icmp_cksum = cal_chksum((unsigned short*)icmpSendPacket, packsize);
   return packsize;
 }
 
 
-
-
-
 void send_packet()
 {
-
   int packetsize;
-
+  struct timeval now;
   while (nsend < MAX_NO_PACKETS) {
     nsend++;
-    packetsize = pack(nsend);
-    if (sendto(sockfd, sendpacket, packetsize, 0, (struct sockaddr*)
-               &dest_addr, sizeof(dest_addr)) < 0) {
+    gettimeofday(&now, NULL);
+    packetsize = build_packet(nsend, &now);
+    if (sendto(sockfd, sendpacket, packetsize, 0,
+               (struct sockaddr*) &dest_addr, sizeof(dest_addr)) < 0) {
       perror("sendto error");
       continue;
+    } else {
+      fprintf(stderr, "sent packet %d\n", nsend);
+      fflush(stderr);
     }
     sleep(1);
-
   }
-
 }
 
-
-
-
-
 void recv_packet()
-
 {
   ssize_t n;
   socklen_t fromlen;
   extern int errno;
 
-  signal(SIGALRM, statistics);
   fromlen = sizeof(from);
 
   while (nreceived < nsend) {
-
     alarm(MAX_WAIT_TIME);
     if ((n = recvfrom(sockfd,
                       recvpacket,
                       sizeof(recvpacket), 0,
                       (struct sockaddr*) &from, &fromlen)) < 0)
-
     {
-
       if (errno == EINTR) {
         continue;
       }
-
       perror("recvfrom error");
-
       continue;
-
     }
     gettimeofday(&tvrecv, NULL);
-
     if (unpack(recvpacket, n) ==  - 1) continue;
-
     nreceived++;
-
   }
 
 }
 
 
-
-
-
 int unpack(char *buf, long len) {
 
   int iphdrlen;
-
   struct ip *ip;
-
   struct icmp *icmp;
-
   struct timeval *tvsend;
-
   double rtt;
-
   ip = (struct ip*)buf;
-
   iphdrlen = ip->ip_hl << 2;
-
   icmp = (struct icmp*)(buf + iphdrlen);
-
   len -= iphdrlen;
-
+  int rv = -1;
   if (len < 8)  {
     fprintf(stderr, "ICMP packets length less than 8: %ld\n", len);
-    return  - 1;
-  }
-
-  if ((icmp->icmp_type == ICMP_ECHOREPLY) && (icmp->icmp_id == pid))  {
-
+    printf("f, %d, \"\", 0, 0, 0, \"packet too small\"\n",
+           (int)len);
+  } else if ((icmp->icmp_type == ICMP_ECHOREPLY) && (icmp->icmp_id == pid))  {
     tvsend = (struct timeval*)icmp->icmp_data;
-
     tv_sub(&tvrecv, tvsend);
-
     rtt = tvrecv.tv_sec * 1000+tvrecv.tv_usec / 1000;
     fprintf(stderr,
             "%d byte from %s: icmp_seq=%u ttl=%d rtt=%.3f ms\n",
             (int)len,
-           inet_ntoa(from.sin_addr), icmp->icmp_seq, ip->ip_ttl, rtt);
-    // TODO? Good value
-    return 0;
-  }  else {
+            inet_ntoa(from.sin_addr),
+            icmp->icmp_seq,
+            ip->ip_ttl,
+            rtt);
+    // Good value
+    // success, length, from, sequence, ttl, rtt
+    printf("s, %d, \"%s\", %u, %d, %0.3f, \"\"\n",
+            (int)len,
+            inet_ntoa(from.sin_addr),
+           icmp->icmp_seq,
+           ip->ip_ttl,
+           rtt);
 
-    return  - 1;
+    rv = 0;
+  } else {
+    printf("f, %d, \"%s\", %u, 0, 0, \"wrong packet type/id\"\n",
+           (int)len,
+           inet_ntoa(from.sin_addr),
+           icmp->icmp_seq);
   }
+  fflush(stdout);
+  return rv;
 }
 
 
@@ -294,6 +285,7 @@ int main(int argc, const char * argv[]) {
     return quit(-1, "Unknown address");
   }
 
+  signal(SIGALRM, statistics);
   send_packet();
   recv_packet();
   statistics(SIGALRM);
