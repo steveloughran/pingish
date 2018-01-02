@@ -7,6 +7,8 @@
 
 // see https://github.com/hayderimran7/advanced-socket-programming/blob/master/ping.c
 
+//#define _POSIX_C_SOURCE 200112L
+
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +28,8 @@
 #include <setjmp.h>
 #include <errno.h>
 
+
+/** size of a packet */
 #define PACKET_SIZE     4096
 #define MAX_WAIT_TIME   5
 #define MAX_NO_PACKETS  4
@@ -39,7 +43,7 @@
 #define PING_PACKET_TOO_SMALL 5
 #define PING_IO_FAILURE 6
 #define PING_INTERRUPTED 7
-
+#define PING_SEND_FAIL 8
 
 
 char sendpacket[PACKET_SIZE];
@@ -51,22 +55,37 @@ struct icmp* icmpRecvPacket = (struct icmp*)recvpacket;
 int sockfd = 0;
 int datalen = 56;
 
-int nsend = 0;
-int success_count = 0;
+int sent_packets = 0;
+int successfully_received_packets = 0;
 
-struct sockaddr_in dest_addr;
-
+/**
+ Process ID, used in echo header.
+ */
 pid_t pid;
 
 /** Origin for records. */
-char * origin;
+const char * origin;
 
+/**
+ Socket address where the packets are sent from.
+ */
 struct sockaddr_in from;
+
+/**
+ Destination socket address
+ */
+struct sockaddr_in dest_addr;
 
 typedef struct timeval timestamp;
 timestamp tvrecv;
 
-/* A ping */
+/** shared error text. */
+//char *ping_error_text = malloc(256 * sizeof(char));
+
+#define ERROR_TEXTLEN 1024
+char* ping_error_text;
+
+/* A ping structure. */
 typedef struct {
   int status;
   int seq;
@@ -76,49 +95,61 @@ typedef struct {
   timestamp received;
   double rtt;
   int ttl;
-  int other;
-  int other2;
+  int code1;
+  int code2;
   char *text;
 } ping_t;
 
+/** time a packet was received. */
 timestamp tvrecv;
 
 // forward declarations
 
 void signalled(int signo);
 
-unsigned short cal_chksum(unsigned short *addr, int len);
-
-//int build_packet(int packet_id);
-
-//void send_packet(void);
-
-//void recv_packet(void);
-
-//int unpack(char *buf, long len);
-
+/**
+ Log the text to stderr.
+ @param txt text to print
+ */
 void log_debug(char *txt) {
   fprintf(stderr, "%s\n", txt);
 }
 
+/**
+ Close the socket and shut down.
+ @param code exit code
+ */
+void shutdown_app(int code) {
+  if (sockfd != 0) {
+    close(sockfd);
+    sockfd = 0;
+  }
+  exit(code);
+}
+
 int quit(int code, const char *msg) {
   fprintf(stderr, "%s\n", msg);
-  exit(code);
+  shutdown_app(code);
   return code;
 }
 
-int pexit(int code, const char *msg) {
+/**
+ Print the system error, then a message, then exit.
+ @param code exit code
+ @param msg string for perror()
+ */
+void pexit(int code, const char *msg) {
   perror(msg);
   exit(code);
-  return code;
 }
 
-/*
+/**
  subtract time.
-
+ @param time intial/updated time.
+ @param diff difference; value subjected
  */
 
-void tv_sub(timestamp *time, timestamp *diff) {
+void tv_sub(timestamp *time, const timestamp *diff) {
 
   if ((time->tv_usec -= diff->tv_usec) < 0)  {
     --time->tv_sec;
@@ -128,24 +159,21 @@ void tv_sub(timestamp *time, timestamp *diff) {
 }
 
 
-void shutdown_app(int code) {
-  if (sockfd != 0) {
-    close(sockfd);
-    sockfd = 0;
-  }
-  exit(code);
-}
-
-void print_stats(void) {
+/**
+ Print the current statistics.
+ */
+void print_stats() {
+  int lost = sent_packets - successfully_received_packets;
   fprintf(stderr, "\n%d packets transmitted, %d received , %d%% lost\n",
-          nsend,
-         success_count,
-          (nsend - success_count) / nsend * 100);
+          sent_packets,
+         successfully_received_packets,
+          lost  * 100 / sent_packets);
 }
 
-/*
+/**
  Callback on a signal.
  Print some stats to stderr; then exit
+ @param signo received
  */
 void signalled(int signo) {
   fprintf(stderr, "\nreceived signal %d\n", signo);
@@ -154,7 +182,11 @@ void signalled(int signo) {
 }
 
 
-/* Calculate the checksum. */
+/**
+ Calculate the checksum.
+ @param addr buffer address
+ @param len length of buffer
+ */
 unsigned short cal_chksum(unsigned short *addr, int len)
 {
   int nleft = len;
@@ -166,7 +198,7 @@ unsigned short cal_chksum(unsigned short *addr, int len)
     nleft -= 2;
   }
 
-  if (nleft == 1)  {
+  if (nleft == 1) {
     *(unsigned char*)(&answer) = *(unsigned char*)w;
     sum += answer;
   }
@@ -176,13 +208,14 @@ unsigned short cal_chksum(unsigned short *addr, int len)
   return answer;
 }
 
-/*
+/**
  Build a packet in icmpSendPacket.
- packet_id: id to use in sequence ID.
+ @param packet_id id to use in sequence ID
+ @param now timestamp
+ @retur: packet size
  */
 
-int build_packet(int packet_id, timestamp* now)
-{
+int build_packet(int packet_id, timestamp* now) {
   int packsize;
   timestamp *tval;
   icmpSendPacket->icmp_type = ICMP_ECHO;
@@ -197,63 +230,95 @@ int build_packet(int packet_id, timestamp* now)
   return packsize;
 }
 
-/*
- Send a packet
-  ping: ping struct to summarise the request
-  seq: sequence ID
+/**
+ Send a packet.
+  @param ping ping struct to summarise the request
+  @param seq sequence ID
+  @return error code from sendto.
  */
-int send_packet(ping_t *ping, int seq)
-{
+int send_packet(ping_t *ping, int seq) {
   int packetsize;
   timestamp now;
   // ping_t *ping = malloc(sizeof(ping_t));
   memset(ping, 0, sizeof(ping_t));
   gettimeofday(&now, NULL);
-  packetsize = build_packet(nsend, &now);
-  if (sendto(sockfd, sendpacket, packetsize, 0,
-             (struct sockaddr*) &dest_addr, sizeof(dest_addr)) < 0) {
-    perror("sendto error");
-    return 0;
+  packetsize = build_packet(sent_packets, &now);
+  sent_packets++;
+  errno = 0;
+  ssize_t sent = sendto(sockfd, sendpacket, packetsize, 0,
+                    (struct sockaddr*) &dest_addr, sizeof(dest_addr));
+
+  ping->sent = now;
+  ping->seq = seq;
+  ping->text = NULL;
+  ping->len = packetsize;
+
+  if (sent < 0) {
+    ping->status = PING_SEND_FAIL;
+    ping->code1 = errno;
+
+    // this is using a shared buffer here, but it is that or switch to always freeing the ref
+    char *etext = strerror(errno);
+    strncpy(ping_error_text, etext, ERROR_TEXTLEN);
+    ping->text =ping_error_text;
+    //fprintf(stderr, "Error on send exit code %d text %s\n", errno, ping_error_text);
+    //perror("sending");
+
+
+    return -1;
   } else {
-    fprintf(stderr, "sent packet %d\n", nsend);
+    fprintf(stderr, "sent packet %d\n", sent_packets);
     fflush(stderr);
-    ping->sent = now;
     ping->status = PING_OUTSTANDING;
     ping->seq = seq;
-    ping->text = NULL;
-    ping->len = packetsize;
-    nsend++;
-    return 1;
+    return 0;
   }
 }
 
-
+/**
+ Flush stdout.
+ */
 void flush() {
   fflush(stdout);
 }
 
+/**
+ Print the csv header to stdout.
+ */
 void print_header() {
-  printf("\"outcome\", \"sequence\", \"origin\", \"dest\", \"length\", \"ttl\", \"rtt\", \"other\", \"other2\", \"text\"\n");
+  printf("timestamp, date, outcome, sequence, origin, dest, length, ttl, rtt, code1, code2, text\n");
   fflush(stdout);
 }
 
-/** Print a packet. Does not flush stdout */
+/**
+ Print a packet.
+ Does not flush stdout
+ @param ping ping result to print
+ */
 void print_packet(ping_t *ping) {
-  printf("%d, %d, \"%s\", %d, %d, %0.3f, %d, %d, \"%s\"\n",
+
+
+  printf("%ld, \"%s\", %d, %d, \"%s\", \"%s\", %d, %d, %0.3f, %d, %d, \"%s\"\n",
+         ping->sent.tv_sec,
+         "todo",
          ping->status,
          ping->seq,
+         origin,
          (ping->dest_addr.s_addr
            ? inet_ntoa(ping->dest_addr)
            : ""),
          ping->len,
          ping->ttl,
          ping->rtt,
-         ping->other,
-         ping->other2,
+         ping->code1,
+         ping->code2,
          ping->text);
 }
 
-/** Handle a received ping. */
+/**
+ Handle a received ping.
+ @return the status passed in.
+ */
 int received_ping(ping_t *ping,
               int status,
               int seq,
@@ -263,7 +328,7 @@ int received_ping(ping_t *ping,
               timestamp *received,
               int ttl,
               double rtt,
-              int other,
+              int code1,
               char *text) {
   memset(ping, 0, sizeof(ping_t));
   ping->status = status;
@@ -274,15 +339,22 @@ int received_ping(ping_t *ping,
   ping->ttl = ttl;
   ping->rtt = rtt;
   ping->text = text;
-  ping->other = other;
+  ping->code1 = code1;
   return status;
 }
 
-int is_success(ping_t *ping) {
+/**
+ Does the ping status code indicate success?
+ @param ping to examine
+ */
+int is_success(const ping_t *ping) {
   return ping->status == PING_SUCCESS;
 }
 
-/* Unpack the packet into a ping struct. Returns the outcome. */
+/*
+ Unpack the packet into a ping struct.
+ @return the ping status field.
+ */
 int unpack(char *buf, long len, ping_t *ping, timestamp* now) {
   int iphdrlen;
   struct ip *ip;
@@ -295,18 +367,21 @@ int unpack(char *buf, long len, ping_t *ping, timestamp* now) {
   len -= iphdrlen;
   if (len < 8) {
     fprintf(stderr, "ICMP packets length less than 8: %ld\n", len);
-    return received_ping(ping, PING_PACKET_TOO_SMALL, 0, 0, NULL, NULL, now, 0, 0, 0, "Packet too short");
+    return received_ping(ping,
+                         PING_PACKET_TOO_SMALL,
+                         0,
+                         (int)len,
+                         &from.sin_addr,
+                         NULL,
+                         now,
+                         0,
+                         0,
+                         0,
+                         "Packet too short");
   } else if (icmp->icmp_type == ICMP_ECHOREPLY)  {
     tvsend = (timestamp*)icmp->icmp_data;
     tv_sub(&tvrecv, tvsend);
     rtt = tvrecv.tv_sec * 1000+tvrecv.tv_usec / 1000;
-    fprintf(stderr,
-            "%d byte from %s: icmp_seq=%u ttl=%d rtt=%.3f ms\n",
-            (int)len,
-            inet_ntoa(from.sin_addr),
-            icmp->icmp_seq,
-            ip->ip_ttl,
-            rtt);
     // Good packet type
     // success, length, from, sequence, ttl, rtt
     int expectedPid = (icmp->icmp_id == pid);
@@ -323,13 +398,6 @@ int unpack(char *buf, long len, ping_t *ping, timestamp* now) {
                   expectedPid ? "" : "Wrong icmp_id");
 
   } else {
-/*
- printf("%d, %d, \"%s\", %u, 0, 0, \"wrong packet type/id\"\n",
-           PING_MISMATCH,
-           (int)len,
-           inet_ntoa(from.sin_addr),
-           icmp->icmp_seq);
- */
     received_ping(ping,
                   PING_MISMATCH,
                   icmp->icmp_seq,
@@ -341,13 +409,17 @@ int unpack(char *buf, long len, ping_t *ping, timestamp* now) {
                   0,
                   icmp->icmp_type,
                   "Wrong packet icmp_type");
-    ping->other2 = icmp->icmp_code;
+    ping->code2 = icmp->icmp_code;
     return ping->status;
   }
 }
 
 // see http://www.gnu.org/software/libc/manual/html_node/Waiting-for-I_002fO.html#Waiting-for-I_002fO
-
+/**
+ Wait for a packet to be received
+ @param ping the ping to fill in.
+ @return the ping status
+ */
 int recv_packet(ping_t *ping, int wait_time_s) {
   ssize_t n;
   socklen_t fromlen;
@@ -399,28 +471,43 @@ int recv_packet(ping_t *ping, int wait_time_s) {
   return unpack(recvpacket, n, ping, &tvrecv);
 }
 
-
+/**
+ Execute a single ping send/receive sequence.
+ @param wait wait time
+ @param seq_no sequence number for the packet
+ @return a new ping
+ */
 ping_t ping_once(int wait, int seq_no) {
   ping_t received;
   ping_t ping;
-  if (send_packet(&ping, seq_no)) {
-    int outcome = recv_packet(&received, wait);
-    switch (outcome) {
-      case PING_INTERRUPTED:
-      case PING_IO_FAILURE:
-        fprintf(stderr, "outcome=%d", outcome);
-        break;
+  ping_t result;
+  int outcome;
 
-      case PING_SUCCESS:
-      default:
-        print_packet(&received);
-        flush();
-        break;
-    }
+  if (0 == send_packet(&ping, seq_no)) {
+    outcome = recv_packet(&received, wait);
+    result = received;
+  } else {
+    outcome = ping.status;
+    result = ping;
   }
-  return received;
+  switch (outcome) {
+    case PING_INTERRUPTED:
+    case PING_IO_FAILURE:
+      fprintf(stderr, "outcome=%d", outcome);
+      break;
+
+    case PING_SUCCESS:
+    default:
+      print_packet(&result);
+      flush();
+      break;
+    }
+  return result;
 }
 
+/**
+ Entry point.
+ */
 int main(int argc, const char * argv[]) {
 //  struct hostent *host;
   struct protoent *protocol;
@@ -428,9 +515,14 @@ int main(int argc, const char * argv[]) {
 //  int waittime = 10 * 60 * 1000;
   int size = RX_BUF_SIZE;
 
-  if (argc != 2) {
-    return quit(1, "Usage: pingish: <ipaddr>");
+  if (argc != 3) {
+    return quit(1, "Usage: pingish: <origin> <ipaddr>");
   }
+
+  ping_error_text = malloc(ERROR_TEXTLEN);
+  strcpy(ping_error_text, "unset");
+  origin = argv[1];
+  const char *dest = argv[2];
   protocol = getprotobyname("icmp");
   assert(protocol != NULL);
 
@@ -444,7 +536,7 @@ int main(int argc, const char * argv[]) {
   bzero(&dest_addr, sizeof(dest_addr));
 
   dest_addr.sin_family = AF_INET;
-  dest_addr.sin_addr.s_addr = inet_addr(argv[1]);
+  dest_addr.sin_addr.s_addr = inet_addr(dest);
   if (INADDR_NONE == dest_addr.sin_addr.s_addr) {
     return quit(-1, "Unknown address");
   }
@@ -458,7 +550,9 @@ int main(int argc, const char * argv[]) {
   int seq_no = 1;
   do {
     ping_t received = ping_once(wait, seq_no++);
-    success_count += is_success(&received);;
+    if (is_success(&received)) {
+      successfully_received_packets++;
+    }
     if (!(seq_no % 15)) {
       print_stats();
     }

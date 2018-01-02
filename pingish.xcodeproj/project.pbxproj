@@ -23,6 +23,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		BC7C9D361FFBA57D00ED4B43 /* Doxyfile */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = Doxyfile; sourceTree = "<group>"; };
 		BC7CCE431FF14FE100EB901F /* pingish */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "compiled.mach-o.executable"; path = pingish; sourceTree = BUILT_PRODUCTS_DIR; };
 		BC7CCE461FF14FE100EB901F /* main.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = main.c; sourceTree = "<group>"; };
 		BC7CCE4D1FF3B42100EB901F /* CMakeLists.txt */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = CMakeLists.txt; sourceTree = "<group>"; };
@@ -58,6 +59,7 @@
 		BC7CCE451FF14FE100EB901F /* pingish */ = {
 			isa = PBXGroup;
 			children = (
+				BC7C9D361FFBA57D00ED4B43 /* Doxyfile */,
 				BC7CCE461FF14FE100EB901F /* main.c */,
 				BC7CCE4D1FF3B42100EB901F /* CMakeLists.txt */,
 			);
@@ -251,6 +253,7 @@
 				BC7CCE4C1FF14FE100EB901F /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
 	};
