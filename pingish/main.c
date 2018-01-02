@@ -52,10 +52,16 @@ struct icmp* icmpSendPacket = (struct icmp*)sendpacket;
 char recvpacket[PACKET_SIZE];
 struct icmp* icmpRecvPacket = (struct icmp*)recvpacket;
 
+/**
+ Socket to send to
+ */
 int sockfd = 0;
 int datalen = 56;
 
+/** Count of sent packets (or attempted to be sent). */
 int sent_packets = 0;
+
+/** Count of valid packets received. */
 int successfully_received_packets = 0;
 
 /**
@@ -77,6 +83,8 @@ struct sockaddr_in from;
 struct sockaddr_in dest_addr;
 
 typedef struct timeval timestamp;
+
+/** Time the last packet was received. */
 timestamp tvrecv;
 
 /** shared error text. */
@@ -127,6 +135,9 @@ void shutdown_app(int code) {
   exit(code);
 }
 
+/**
+ Print the message, shut down the app.
+ */
 int quit(int code, const char *msg) {
   fprintf(stderr, "%s\n", msg);
   shutdown_app(code);
@@ -186,9 +197,9 @@ void signalled(int signo) {
  Calculate the checksum.
  @param addr buffer address
  @param len length of buffer
+ @return the checksum
  */
-unsigned short cal_chksum(unsigned short *addr, int len)
-{
+unsigned short cal_chksum(unsigned short *addr, int len) {
   int nleft = len;
   int sum = 0;
   unsigned short *w = addr;
@@ -212,7 +223,7 @@ unsigned short cal_chksum(unsigned short *addr, int len)
  Build a packet in icmpSendPacket.
  @param packet_id id to use in sequence ID
  @param now timestamp
- @retur: packet size
+ @return packet size
  */
 
 int build_packet(int packet_id, timestamp* now) {
@@ -267,8 +278,8 @@ int send_packet(ping_t *ping, int seq) {
 
     return -1;
   } else {
-    fprintf(stderr, "sent packet %d\n", sent_packets);
-    fflush(stderr);
+//    fprintf(stderr, "sent packet %d\n", sent_packets);
+  //  fflush(stderr);
     ping->status = PING_OUTSTANDING;
     ping->seq = seq;
     return 0;
@@ -297,10 +308,20 @@ void print_header() {
  */
 void print_packet(ping_t *ping) {
 
+  char printtime[256];
+  char *ttext;
+  if(ping->sent.tv_sec > 0) {
+    // darwin not consistent w posix here.
+    time_t t = (time_t)ping->sent.tv_sec;
+    strftime(printtime, 256, "%Y-%m-%d %H:%M:%S", localtime(&t));
+    ttext = printtime;
+  }else {
+    ttext = "";
+  }
 
   printf("%ld, \"%s\", %d, %d, \"%s\", \"%s\", %d, %d, %0.3f, %d, %d, \"%s\"\n",
          ping->sent.tv_sec,
-         "todo",
+         ttext,
          ping->status,
          ping->seq,
          origin,
@@ -437,7 +458,7 @@ int recv_packet(ping_t *ping, int wait_time_s) {
  // alarm(MAX_WAIT_TIME);
 
   /* now await the packet */
-  log_debug("waiting");
+//  log_debug("waiting");
   int select_outcome = select(FD_SETSIZE,
           &selection,
           NULL,
@@ -447,7 +468,7 @@ int recv_packet(ping_t *ping, int wait_time_s) {
 
   if (select_outcome == 0) {
     // timeout
-    log_debug("timeout");
+//    log_debug("timeout");
     return received_ping(ping, PING_TIMEOUT, 0, 0, NULL, NULL, &tvrecv, 0, 0, wait_time_s, "Timeout");
   } else if (select_outcome == -1) {
     perror("select failure");
@@ -518,11 +539,13 @@ int main(int argc, const char * argv[]) {
   if (argc != 3) {
     return quit(1, "Usage: pingish: <origin> <ipaddr>");
   }
+  origin = argv[1];
+  // destination hostname or IPAddr
+  const char *dest = argv[2];
 
   ping_error_text = malloc(ERROR_TEXTLEN);
   strcpy(ping_error_text, "unset");
-  origin = argv[1];
-  const char *dest = argv[2];
+
   protocol = getprotobyname("icmp");
   assert(protocol != NULL);
 
@@ -533,12 +556,24 @@ int main(int argc, const char * argv[]) {
   print_header();
   setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
 
+
+
   bzero(&dest_addr, sizeof(dest_addr));
 
   dest_addr.sin_family = AF_INET;
-  dest_addr.sin_addr.s_addr = inet_addr(dest);
-  if (INADDR_NONE == dest_addr.sin_addr.s_addr) {
-    return quit(-1, "Unknown address");
+  in_addr_t dest_s_addr = inet_addr(dest);
+
+  if (INADDR_NONE == dest_s_addr) {
+    // look up hostname. Requires DNS to be up or /etc/hosts to have the destination
+    struct hostent *desthost = gethostbyname(dest);
+    if (!desthost) {
+      herror("gethostbyname");
+      return quit(1, "hostname lookup failure");
+    }
+    memcpy((char*) &dest_addr.sin_addr, desthost->h_addr, desthost->h_length);
+
+  } else {
+    dest_addr.sin_addr.s_addr = dest_s_addr;
   }
 
   signal(SIGALRM, signalled);
