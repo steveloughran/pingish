@@ -105,7 +105,7 @@ typedef struct {
   int ttl;
   int code1;
   int code2;
-  char *text;
+  const char *text;
 } ping_t;
 
 /** time a packet was received. */
@@ -155,18 +155,20 @@ void pexit(int code, const char *msg) {
 }
 
 /**
- subtract time.
+ subtract time, leaving the source time with the difference (i.e. this is destructive).
  @param time intial/updated time.
- @param diff difference; value subjected
+ @param diff difference; value subtracted
+ @return difference in millis
  */
 
-void tv_sub(timestamp *time, const timestamp *diff) {
+long subtract_times(timestamp *time, const timestamp *diff) {
 
   if ((time->tv_usec -= diff->tv_usec) < 0)  {
     --time->tv_sec;
     time->tv_usec += 1000000;
   }
   time->tv_sec -= diff->tv_sec;
+  return time->tv_sec * 1000 + time->tv_usec / 1000;
 }
 
 
@@ -175,7 +177,7 @@ void tv_sub(timestamp *time, const timestamp *diff) {
  */
 void print_stats() {
   int lost = sent_packets - successfully_received_packets;
-  fprintf(stderr, "\n%d packets transmitted, %d received , %d%% lost\n",
+  fprintf(stderr, "\n%d packets transmitted, %d received , %d%% failed\n",
           sent_packets,
          successfully_received_packets,
           lost  * 100 / sent_packets);
@@ -226,7 +228,7 @@ unsigned short cal_chksum(unsigned short *addr, int len) {
  @return packet size
  */
 
-int build_packet(int packet_id, timestamp* now) {
+int build_packet(int packet_id, const timestamp* now) {
   int packsize;
   timestamp *tval;
   icmpSendPacket->icmp_type = ICMP_ECHO;
@@ -306,7 +308,7 @@ void print_header() {
  Does not flush stdout
  @param ping ping result to print
  */
-void print_packet(ping_t *ping) {
+void print_packet(const ping_t *ping) {
 
   char printtime[256];
   char *ttext;
@@ -340,27 +342,27 @@ void print_packet(ping_t *ping) {
  Handle a received ping.
  @return the status passed in.
  */
-int received_ping(ping_t *ping,
+int received_ping(ping_t *rx_ping,
               int status,
               int seq,
               int len,
-              struct in_addr *dest_addr,
-              timestamp *sent,
-              timestamp *received,
+              const struct in_addr *dest_addr,
+              const timestamp *sent,
+              const timestamp *received,
               int ttl,
               double rtt,
               int code1,
-              char *text) {
-  memset(ping, 0, sizeof(ping_t));
-  ping->status = status;
-  ping->seq = seq;
-  if (dest_addr) ping->dest_addr = *dest_addr;
-  if (sent) ping->sent = *sent;
-  ping->received = *received;
-  ping->ttl = ttl;
-  ping->rtt = rtt;
-  ping->text = text;
-  ping->code1 = code1;
+              const char *text) {
+  memset(rx_ping, 0, sizeof(ping_t));
+  rx_ping->status = status;
+  rx_ping->seq = seq;
+  if (dest_addr) rx_ping->dest_addr = *dest_addr;
+  if (sent) rx_ping->sent = *sent;
+  rx_ping->received = *received;
+  rx_ping->ttl = ttl;
+  rx_ping->rtt = rtt;
+  rx_ping->text = text;
+  rx_ping->code1 = code1;
   return status;
 }
 
@@ -376,11 +378,12 @@ int is_success(const ping_t *ping) {
  Unpack the packet into a ping struct.
  @return the ping status field.
  */
-int unpack(char *buf, long len, ping_t *ping, timestamp* now) {
+int unpack(char *buf, long len, ping_t *rx_ping, const ping_t *tx_ping, timestamp* now) {
   int iphdrlen;
   struct ip *ip;
   struct icmp *icmp;
   timestamp *tvsend;
+  timestamp now_t = *now;
   double rtt;
   ip = (struct ip*)buf;
   iphdrlen = ip->ip_hl << 2;
@@ -388,7 +391,7 @@ int unpack(char *buf, long len, ping_t *ping, timestamp* now) {
   len -= iphdrlen;
   if (len < 8) {
     fprintf(stderr, "ICMP packets length less than 8: %ld\n", len);
-    return received_ping(ping,
+    return received_ping(rx_ping,
                          PING_PACKET_TOO_SMALL,
                          0,
                          (int)len,
@@ -401,12 +404,11 @@ int unpack(char *buf, long len, ping_t *ping, timestamp* now) {
                          "Packet too short");
   } else if (icmp->icmp_type == ICMP_ECHOREPLY)  {
     tvsend = (timestamp*)icmp->icmp_data;
-    tv_sub(&tvrecv, tvsend);
-    rtt = tvrecv.tv_sec * 1000+tvrecv.tv_usec / 1000;
+    rtt = subtract_times(&now_t, tvsend);
     // Good packet type
     // success, length, from, sequence, ttl, rtt
     int expectedPid = (icmp->icmp_id == pid);
-    return received_ping(ping,
+    return received_ping(rx_ping,
                   expectedPid ? PING_SUCCESS : PING_MISMATCH,
                   icmp->icmp_seq,
                   (int)len,
@@ -419,34 +421,36 @@ int unpack(char *buf, long len, ping_t *ping, timestamp* now) {
                   expectedPid ? "" : "Wrong icmp_id");
 
   } else {
-    received_ping(ping,
+    received_ping(rx_ping,
                   PING_MISMATCH,
                   icmp->icmp_seq,
                   (int)len,
                   &from.sin_addr,
-                  NULL,
+                  &(tx_ping->sent),
                   now,
                   0,
-                  0,
+                  subtract_times(&now_t, &(tx_ping->sent)),
                   icmp->icmp_type,
                   "Wrong packet icmp_type");
-    ping->code2 = icmp->icmp_code;
-    return ping->status;
+    rx_ping->code2 = icmp->icmp_code;
+    return rx_ping->status;
   }
 }
 
 // see http://www.gnu.org/software/libc/manual/html_node/Waiting-for-I_002fO.html#Waiting-for-I_002fO
 /**
  Wait for a packet to be received
- @param ping the ping to fill in.
+ @param rx_ping the ping to fill in.
+ @param tx_ping sent the original sent packet
  @return the ping status
  */
-int recv_packet(ping_t *ping, int wait_time_s) {
+int recv_packet(ping_t *rx_ping, const ping_t *tx_ping, int wait_time_s) {
   ssize_t n;
   socklen_t fromlen;
   extern int errno;
   fd_set selection;
   timestamp timeout;
+  timestamp select_duration;
 
   /* Initialize the file descriptor set. */
   FD_ZERO(&selection);
@@ -465,14 +469,36 @@ int recv_packet(ping_t *ping, int wait_time_s) {
           NULL,
           &timeout);
   gettimeofday(&tvrecv, NULL);
+  select_duration = tvrecv;
+  long interval = subtract_times(&select_duration, &tx_ping->sent);
+
 
   if (select_outcome == 0) {
     // timeout
 //    log_debug("timeout");
-    return received_ping(ping, PING_TIMEOUT, 0, 0, NULL, NULL, &tvrecv, 0, 0, wait_time_s, "Timeout");
+    return received_ping(rx_ping,
+                         PING_TIMEOUT,
+                         0,
+                         0,
+                         NULL,
+                         &tx_ping->sent, &tvrecv,
+                         0,
+                         interval,
+                         wait_time_s,
+                         "Timeout");
   } else if (select_outcome == -1) {
     perror("select failure");
-    return received_ping(ping, PING_IO_FAILURE, 0, 0, NULL, NULL, &tvrecv, 0, 0, 0, "select failure");
+    return received_ping(rx_ping,
+                         PING_IO_FAILURE,
+                         0,
+                         0,
+                         NULL,
+                         &tx_ping->sent,
+                         &tvrecv,
+                         0,
+                         interval,
+                         errno,
+                         "select failure");
   }
   fromlen = sizeof(from);
 
@@ -489,7 +515,7 @@ int recv_packet(ping_t *ping, int wait_time_s) {
     return PING_IO_FAILURE;
   }
   gettimeofday(&tvrecv, NULL);
-  return unpack(recvpacket, n, ping, &tvrecv);
+  return unpack(recvpacket, n, rx_ping, tx_ping, &tvrecv);
 }
 
 /**
@@ -500,16 +526,16 @@ int recv_packet(ping_t *ping, int wait_time_s) {
  */
 ping_t ping_once(int wait, int seq_no) {
   ping_t received;
-  ping_t ping;
+  ping_t sent;
   ping_t result;
   int outcome;
 
-  if (0 == send_packet(&ping, seq_no)) {
-    outcome = recv_packet(&received, wait);
+  if (0 == send_packet(&sent, seq_no)) {
+    outcome = recv_packet(&received, &sent, wait);
     result = received;
   } else {
-    outcome = ping.status;
-    result = ping;
+    outcome = sent.status;
+    result = sent;
   }
   switch (outcome) {
     case PING_INTERRUPTED:
@@ -579,9 +605,9 @@ int main(int argc, const char * argv[]) {
   signal(SIGALRM, signalled);
   signal(SIGINT, signalled);
   signal(SIGINT, signalled);
-  int wait = 1;
+  int wait = 2;
   int sleeptime = 2;
-  int total = 32;
+  int total = 2048;
   int seq_no = 1;
   do {
     ping_t received = ping_once(wait, seq_no++);
