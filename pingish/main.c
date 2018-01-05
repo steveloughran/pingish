@@ -342,7 +342,7 @@ void print_packet(const ping_t *ping) {
  Handle a received ping.
  @return the status passed in.
  */
-int received_ping(ping_t *rx_ping,
+int mkping(ping_t *rx_ping,
               int status,
               int seq,
               int len,
@@ -383,6 +383,7 @@ int unpack(char *buf, long len, ping_t *rx_ping, const ping_t *tx_ping, timestam
   struct ip *ip;
   struct icmp *icmp;
   timestamp *tvsend;
+  timestamp senttime =tx_ping->sent;
   timestamp now_t = *now;
   double rtt;
   ip = (struct ip*)buf;
@@ -391,24 +392,24 @@ int unpack(char *buf, long len, ping_t *rx_ping, const ping_t *tx_ping, timestam
   len -= iphdrlen;
   if (len < 8) {
     fprintf(stderr, "ICMP packets length less than 8: %ld\n", len);
-    return received_ping(rx_ping,
-                         PING_PACKET_TOO_SMALL,
-                         0,
-                         (int)len,
-                         &from.sin_addr,
-                         NULL,
-                         now,
-                         0,
-                         0,
-                         0,
-                         "Packet too short");
+    return mkping(rx_ping,
+                 PING_PACKET_TOO_SMALL,
+                 0,
+                 (int)len,
+                 &from.sin_addr,
+                 &senttime,
+                 now,
+                 0,
+                 subtract_times(&now_t, &senttime),
+                 0,
+                 "Packet too short");
   } else if (icmp->icmp_type == ICMP_ECHOREPLY)  {
     tvsend = (timestamp*)icmp->icmp_data;
     rtt = subtract_times(&now_t, tvsend);
     // Good packet type
     // success, length, from, sequence, ttl, rtt
     int expectedPid = (icmp->icmp_id == pid);
-    return received_ping(rx_ping,
+    return mkping(rx_ping,
                   expectedPid ? PING_SUCCESS : PING_MISMATCH,
                   icmp->icmp_seq,
                   (int)len,
@@ -421,17 +422,17 @@ int unpack(char *buf, long len, ping_t *rx_ping, const ping_t *tx_ping, timestam
                   expectedPid ? "" : "Wrong icmp_id");
 
   } else {
-    received_ping(rx_ping,
-                  PING_MISMATCH,
-                  icmp->icmp_seq,
-                  (int)len,
-                  &from.sin_addr,
-                  &(tx_ping->sent),
-                  now,
-                  0,
-                  subtract_times(&now_t, &(tx_ping->sent)),
-                  icmp->icmp_type,
-                  "Wrong packet icmp_type");
+    mkping(rx_ping,
+          PING_MISMATCH,
+          icmp->icmp_seq,
+          (int)len,
+          &from.sin_addr,
+          &senttime,
+          now,
+          0,
+          subtract_times(&now_t, &senttime),
+          icmp->icmp_type,
+          "Wrong packet icmp_type");
     rx_ping->code2 = icmp->icmp_code;
     return rx_ping->status;
   }
@@ -476,29 +477,29 @@ int recv_packet(ping_t *rx_ping, const ping_t *tx_ping, int wait_time_s) {
   if (select_outcome == 0) {
     // timeout
 //    log_debug("timeout");
-    return received_ping(rx_ping,
-                         PING_TIMEOUT,
-                         0,
-                         0,
-                         NULL,
-                         &tx_ping->sent, &tvrecv,
-                         0,
-                         interval,
-                         wait_time_s,
-                         "Timeout");
+    return mkping(rx_ping,
+                 PING_TIMEOUT,
+                 tx_ping->seq,
+                 0,
+                 NULL,
+                 &tx_ping->sent, &tvrecv,
+                 0,
+                 interval,
+                 wait_time_s,
+                 "Timeout");
   } else if (select_outcome == -1) {
     perror("select failure");
-    return received_ping(rx_ping,
-                         PING_IO_FAILURE,
-                         0,
-                         0,
-                         NULL,
-                         &tx_ping->sent,
-                         &tvrecv,
-                         0,
-                         interval,
-                         errno,
-                         "select failure");
+    return mkping(rx_ping,
+                 PING_IO_FAILURE,
+                 tx_ping->seq,
+                 0,
+                 NULL,
+                 &tx_ping->sent,
+                 &tvrecv,
+                 0,
+                 interval,
+                 errno,
+                 "select failure");
   }
   fromlen = sizeof(from);
 
@@ -525,17 +526,17 @@ int recv_packet(ping_t *rx_ping, const ping_t *tx_ping, int wait_time_s) {
  @return a new ping
  */
 ping_t ping_once(int wait, int seq_no) {
-  ping_t received;
-  ping_t sent;
+  ping_t rx_ping;
+  ping_t tx_ping;
   ping_t result;
   int outcome;
 
-  if (0 == send_packet(&sent, seq_no)) {
-    outcome = recv_packet(&received, &sent, wait);
-    result = received;
+  if (0 == send_packet(&tx_ping, seq_no)) {
+    outcome = recv_packet(&rx_ping, &tx_ping, wait);
+    result = rx_ping;
   } else {
-    outcome = sent.status;
-    result = sent;
+    outcome = tx_ping.status;
+    result = tx_ping;
   }
   switch (outcome) {
     case PING_INTERRUPTED:
@@ -581,8 +582,6 @@ int main(int argc, const char * argv[]) {
   pid = getpid();
   print_header();
   setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
-
-
 
   bzero(&dest_addr, sizeof(dest_addr));
 
