@@ -57,6 +57,7 @@ struct icmp* icmpRecvPacket = (struct icmp*)recvpacket;
  */
 int sockfd = 0;
 int datalen = 56;
+fd_set selection;
 
 /** Count of sent packets (or attempted to be sent). */
 int sent_packets = 0;
@@ -81,6 +82,7 @@ struct sockaddr_in from;
  Destination socket address
  */
 struct sockaddr_in dest_addr;
+const char *dest_name;
 
 typedef struct timeval timestamp;
 
@@ -265,6 +267,7 @@ int send_packet(ping_t *ping, int seq) {
   ping->seq = seq;
   ping->text = NULL;
   ping->len = packetsize;
+  ping->dest_addr = dest_addr.sin_addr;
 
   if (sent < 0) {
     ping->status = PING_SEND_FAIL;
@@ -317,7 +320,7 @@ void print_packet(const ping_t *ping) {
     time_t t = (time_t)ping->sent.tv_sec;
     strftime(printtime, 256, "%Y-%m-%d %H:%M:%S", localtime(&t));
     ttext = printtime;
-  }else {
+  } else {
     ttext = "";
   }
 
@@ -438,7 +441,28 @@ int unpack(char *buf, long len, ping_t *rx_ping, const ping_t *tx_ping, timestam
   }
 }
 
-// see http://www.gnu.org/software/libc/manual/html_node/Waiting-for-I_002fO.html#Waiting-for-I_002fO
+/**
+ Select a packet.
+ @param wait_time_s time to wait in seconds, can be 0
+ @return the outcome of the select
+ @see http://www.gnu.org/software/libc/manual/html_node/Waiting-for-I_002fO.html#Waiting-for-I_002fO
+ */
+
+int select_packet(int wait_time_s) {
+  /* Initialize the timeout data structure. */
+  timestamp timeout;
+  timeout.tv_sec = wait_time_s;
+  timeout.tv_usec = 0;
+
+  /* now await the packet */
+//  log_debug("waiting");
+  return select(FD_SETSIZE,
+          &selection,
+          NULL,
+          NULL,
+          &timeout);
+}
+
 /**
  Wait for a packet to be received
  @param rx_ping the ping to fill in.
@@ -449,30 +473,13 @@ int recv_packet(ping_t *rx_ping, const ping_t *tx_ping, int wait_time_s) {
   ssize_t n;
   socklen_t fromlen;
   extern int errno;
-  fd_set selection;
-  timestamp timeout;
   timestamp select_duration;
+  int select_outcome;
 
-  /* Initialize the file descriptor set. */
-  FD_ZERO(&selection);
-  FD_SET(sockfd, &selection);
-
-  /* Initialize the timeout data structure. */
-  timeout.tv_sec = wait_time_s;
-  timeout.tv_usec = 0;
- // alarm(MAX_WAIT_TIME);
-
-  /* now await the packet */
-//  log_debug("waiting");
-  int select_outcome = select(FD_SETSIZE,
-          &selection,
-          NULL,
-          NULL,
-          &timeout);
+  select_outcome = select_packet(wait_time_s);
   gettimeofday(&tvrecv, NULL);
   select_duration = tvrecv;
   long interval = subtract_times(&select_duration, &tx_ping->sent);
-
 
   if (select_outcome == 0) {
     // timeout
@@ -481,8 +488,9 @@ int recv_packet(ping_t *rx_ping, const ping_t *tx_ping, int wait_time_s) {
                  PING_TIMEOUT,
                  tx_ping->seq,
                  0,
-                 NULL,
-                 &tx_ping->sent, &tvrecv,
+                 &tx_ping->dest_addr,
+                 &tx_ping->sent,
+                 &tvrecv,
                  0,
                  interval,
                  wait_time_s,
@@ -493,7 +501,7 @@ int recv_packet(ping_t *rx_ping, const ping_t *tx_ping, int wait_time_s) {
                  PING_IO_FAILURE,
                  tx_ping->seq,
                  0,
-                 NULL,
+                 &tx_ping->dest_addr,
                  &tx_ping->sent,
                  &tvrecv,
                  0,
@@ -569,6 +577,7 @@ int main(int argc, const char * argv[]) {
   origin = argv[1];
   // destination hostname or IPAddr
   const char *dest = argv[2];
+  dest_name = dest;
 
   ping_error_text = malloc(ERROR_TEXTLEN);
   strcpy(ping_error_text, "unset");
@@ -600,6 +609,10 @@ int main(int argc, const char * argv[]) {
   } else {
     dest_addr.sin_addr.s_addr = dest_s_addr;
   }
+
+  /* Initialize the file descriptor set. */
+  FD_ZERO(&selection);
+  FD_SET(sockfd, &selection);
 
   signal(SIGALRM, signalled);
   signal(SIGINT, signalled);
